@@ -1,0 +1,30 @@
+[MASTER]
+ignore=venv,.venv,build,dist
+init-hook='import sys; sys.path.insert(0, "src")'
+
+[MESSAGES CONTROL]
+disable=
+    missing-module-docstring,
+    missing-class-docstring,
+    missing-function-docstring,
+    too-few-public-methods,
+    duplicate-code,
+    line-too-long,
+    consider-using-from-import,
+    too-many-locals,
+    too-many-positional-arguments,
+    too-many-statements,
+    unused-variable,
+    wrong-import-order,
+    wrong-import-position,
+    expression-not-assigned,
+    unnecessary-comprehension
+
+[FORMAT]
+max-line-length=100
+
+[DESIGN]
+max-args=10
+
+[TYPECHECK]
+ignored-modules=cv2

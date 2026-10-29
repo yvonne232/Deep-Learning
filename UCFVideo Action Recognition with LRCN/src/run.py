@@ -1,0 +1,289 @@
+"""
+Module: run.py
+
+This module is the main entry point for training or evaluating a video classification model.
+It uses command-line arguments to configure the experiment, including dataset paths, model parameters,
+and training hyperparameters. Depending on the selected mode ('train' or 'eval'), it performs
+the following:
+
+- Train mode:
+    - Loads the dataset from a directory structure.
+    - Splits the dataset into training, validation, and test sets.
+    - Creates PyTorch Datasets and DataLoaders for training and validation.
+    - Initializes the model (e.g., LRCN) and defines the loss function, optimizer, and learning rate scheduler.
+    - Runs the training loop and saves the best model weights.
+
+- Eval mode:
+    - Loads the pre-generated dataset splits.
+    - Creates a DataLoader for the test set.
+    - Loads the trained model checkpoint.
+    - Evaluates the model on the test set and prints overall test accuracy.
+
+The module also includes a helper function for parsing command-line arguments.
+"""
+
+import os
+import copy
+import argparse
+
+import torch
+import torch.nn as nn
+from torch import optim
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
+import numpy as np
+
+from video_datasets import VideoDataset, load_dataset, dataset_split
+from utils import transform_stats, compose_data_transforms, train_val_dloaders, test_dloaders
+from models import LRCN
+from train import train, get_epoch_loss
+from test import test
+
+try:
+    import wandb
+except ImportError:
+    wandb = None
+
+def args_parser():
+    """
+    Parse command-line arguments for configuring the video classification training or evaluation.
+
+    Returns:
+        argparse.Namespace: Parsed command-line arguments.
+
+    Arguments include:
+        -fd/--frame_dir: Directory for storing video frames.
+        -trs/--train_size: Proportion of data to use for training (default 0.7).
+        -tss/--test_size: Proportion of data to use for testing (default 0.1).
+        -fpv/--fr_per_vid: Number of frames per video to consider (default 16).
+        -nc/--n_classes: Number of classes for the classification task (required).
+        -c/--ckpt: Path for loading a trained model checkpoint.
+        -mt/--model_type: Model type, either '3dcnn' or 'lrcn' (default 'lrcn').
+        -cnn/--cnn_backbone: Backbone CNN for 2D feature extraction (default 'resnet34').
+        -p/--pretrained: Whether to use a pretrained CNN backbone (default True).
+        -rhs/--rnn_hidden_size: Number of neurons in the RNN/LSTM hidden layer (default 100).
+        -rnl/--rnn_n_layers: Number of RNN/LSTM layers (default 1).
+        -m/--mode: Mode of operation: 'train' or 'eval' (required).
+        -bs/--batch_size: Mini-batch size (required).
+        -d/--dropout: Dropout rate for regularization (default 0.1).
+        -lr/--learning_rate: Learning rate for training (default 3e-5).
+        -ne/--n_epochs: Number of training epochs (default 30).
+    """
+    parser = argparse.ArgumentParser(description='Video Classification Training')
+
+    parser.add_argument('-fd', '--frame_dir', help='Directory for storing video frames')
+    parser.add_argument('-trs', '--train_size', type=float, default=0.7, help='Train set size')
+    parser.add_argument('-tss', '--test_size', type=float, default=0.1, help='Test set size')
+    parser.add_argument('-fpv', '--fr_per_vid', type=int, default=16, help='Number of frames per video')
+    parser.add_argument('-nc', '--n_classes', type=int, help='Number of classes for the classification task', required=True)
+
+    parser.add_argument('-c', '--ckpt', help='Path for loading trained model checkpoints')
+    parser.add_argument('-mt', '--model_type', help='3D CNN or LRCN', default='lrcn')
+    parser.add_argument('-cnn', '--cnn_backbone', default='resnet34', help='2D CNN backbone - options: resnet18, resnet34, resnet50, resnet101, resnet152')
+    parser.add_argument('-p', '--pretrained', help='Use pretrained 2D CNN backbone', default=True)
+    parser.add_argument('-rhs', '--rnn_hidden_size', type=int, default=100, help='Number of neurons in the RNN/LSTM hidden layer')
+    parser.add_argument('-rnl', '--rnn_n_layers', type=int, default=1, help='Number of RNN/LSTM layers')
+
+    parser.add_argument('-m', '--mode', type=str, default='train', help="Either 'train' or 'eval'", required=True)
+    parser.add_argument('-bs', '--batch_size', type=int, help='Mini-batch size', required=True)
+    parser.add_argument('-d', '--dropout', type=float, default=0.5, help='Dropout rate for regularization')
+    parser.add_argument('-lr', '--learning_rate', type=float, default=1e-4, help='Learning rate for LSTM/head (backbone uses 0.1x)')
+    parser.add_argument('-ne', '--n_epochs', type=int, default=80, help='Number of training epochs')
+    parser.add_argument('--weight_decay', type=float, default=1e-4, help='Adam weight decay')
+    parser.add_argument('--label_smoothing', type=float, default=0.1, help='Cross-entropy label smoothing')
+    parser.add_argument('--use_wandb', action='store_true', help='Log train/val/test metrics to Weights & Biases')
+    parser.add_argument('--wandb_project', default='ucf50-lrcn', help='Weights & Biases project name')
+    parser.add_argument('--wandb_run_name', default=None, help='Optional Weights & Biases run name')
+    parser.add_argument(
+        '--resume',
+        default=None,
+        help='Resume from last_checkpoint.pt or best_model_wts.pt',
+    )
+    parser.add_argument(
+        '--ckpt_dir',
+        default='./models',
+        help='Directory for best_model_wts.pt, last_checkpoint.pt, and splits.npy',
+    )
+
+    args = parser.parse_args()
+    return args
+
+
+def _init_wandb(cli_args):
+    """Start a W&B run when --use_wandb is set."""
+    if not cli_args.use_wandb:
+        return None
+    if wandb is None:
+        raise ImportError("wandb is not installed. Run: pip install wandb")
+    return wandb.init(
+        project=cli_args.wandb_project,
+        name=cli_args.wandb_run_name,
+        config=vars(cli_args),
+    )
+
+def main(args):
+    """
+    Main function to execute training or evaluation based on the parsed command-line arguments.
+
+    For training:
+        - Loads the dataset from the specified frame directory.
+        - Splits the dataset into training, validation, and test sets.
+        - Saves the splits for later use.
+        - Creates the training and validation DataLoaders.
+        - Initializes the model (LRCN) with specified hyperparameters.
+        - Defines the loss function, optimizer, and learning rate scheduler.
+        - Runs the training loop and saves the best model weights.
+
+    For evaluation:
+        - Loads the saved dataset splits.
+        - Creates the test DataLoader.
+        - Loads the trained model checkpoint.
+        - Evaluates the model on the test set and prints the overall test accuracy.
+
+    Args:
+        args (argparse.Namespace): Parsed command-line arguments.
+    """
+    # Dataset parameters
+    frame_dir = args.frame_dir
+    tr_size = args.train_size
+    ts_size = args.test_size
+    fr_per_vid = args.fr_per_vid
+    n_classes = args.n_classes
+
+    # Model parameters
+    model_type = args.model_type
+    rnn_hidden_size = args.rnn_hidden_size
+    rnn_n_layers = args.rnn_n_layers
+    dropout = args.dropout
+    pretrained = args.pretrained
+    cnn_backbone = args.cnn_backbone
+    ckpt = args.ckpt
+
+    # Training parameters
+    mode = args.mode
+    batch_size = args.batch_size
+    n_epochs = args.n_epochs
+    learning_rate = args.learning_rate
+    if torch.cuda.is_available():
+        device = torch.device('cuda:0')
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        device = torch.device('mps')
+    else:
+        device = torch.device('cpu')
+    print(f'Using device: {device}')
+
+    # Load transformation statistics and create data augmentation transforms
+    h, w, mean, std = transform_stats(model_type)
+    tr_transforms, val_ts_transforms = compose_data_transforms(h, w, mean, std)
+
+    # Initialize the model (LRCN)
+    model = LRCN(hidden_size=rnn_hidden_size, n_layers=rnn_n_layers, dropout_rate=dropout,
+                 n_classes=n_classes, pretrained=pretrained, cnn_model=cnn_backbone)
+
+    if mode == 'train':
+        optim_model_dir = args.ckpt_dir
+        os.makedirs(optim_model_dir, exist_ok=True)
+        start_epoch = 0
+        best_val_acc = 0.0
+        best_model_wts = None
+        splits_path = os.path.join(optim_model_dir, 'splits.npy')
+        if not os.path.exists(splits_path) and os.path.exists('./splits.npy'):
+            splits_path = './splits.npy'
+
+        if args.resume and os.path.exists(splits_path):
+            print('Resume: reusing splits.npy so train/val/test stay the same.')
+            splits = np.load(splits_path, allow_pickle=True).item()
+            tr_split = [(s[0], int(s[1])) for s in splits['train']]
+            val_split = [(s[0], int(s[1])) for s in splits['val']]
+            ts_split = [(s[0], int(s[1])) for s in splits['test']]
+        else:
+            vid_dataset, label_dict = load_dataset(frame_dir)
+            tr_split, val_split, ts_split = dataset_split(vid_dataset, tr_size, ts_size)
+            splits = {'train': np.array(tr_split),
+                      'val': np.array(val_split),
+                      'test': np.array(ts_split)}
+            np.save('./splits.npy', splits)
+            np.save(os.path.join(optim_model_dir, 'splits.npy'), splits)
+
+        tr_dataset = VideoDataset(tr_split, fr_per_vid, tr_transforms)
+        val_dataset = VideoDataset(val_split, fr_per_vid, val_ts_transforms)
+        dataloaders = train_val_dloaders(tr_dataset, val_dataset, batch_size, model_type)
+
+        loss_func = nn.CrossEntropyLoss(reduction='sum', label_smoothing=args.label_smoothing)
+        model.to(device)
+        head_params = list(model.rnn.parameters()) + list(model.attn.parameters()) + list(model.fc.parameters())
+        opt = optim.Adam(
+            [
+                {'params': model.base_model.parameters(), 'lr': learning_rate * 0.1},
+                {'params': head_params, 'lr': learning_rate},
+            ],
+            weight_decay=args.weight_decay,
+        )
+        lr_scheduler = ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=5)
+
+        if args.resume:
+            ckpt_obj = torch.load(args.resume, map_location=device)
+            if isinstance(ckpt_obj, dict) and 'model' in ckpt_obj:
+                model.load_state_dict(ckpt_obj['model'])
+                opt.load_state_dict(ckpt_obj['optimizer'])
+                lr_scheduler.load_state_dict(ckpt_obj['scheduler'])
+                start_epoch = int(ckpt_obj.get('epoch', 0))
+                best_val_acc = float(ckpt_obj.get('best_val_acc', 0.0))
+                best_model_wts = ckpt_obj.get('best_model_wts')
+                print(f'Resumed full checkpoint at epoch {start_epoch}.')
+            else:
+                model.load_state_dict(ckpt_obj)
+                best_model_wts = copy.deepcopy(model.state_dict())
+                print('Loaded weights only (no optimizer). Continuing from these weights.')
+
+        wandb_run = _init_wandb(args)
+        model, loss_hist, acc_hist = train(
+            dataloaders, model, loss_func, opt, lr_scheduler, device, optim_model_dir,
+            n_epochs, wandb_run, start_epoch, best_val_acc, best_model_wts,
+        )
+
+        # Log held-out test metrics once (not used for checkpoint selection).
+        ts_dataset = VideoDataset(ts_split, fr_per_vid, val_ts_transforms)
+        test_loaders = test_dloaders(ts_dataset, batch_size, model_type)
+        model.eval()
+        with torch.no_grad():
+            test_loss, test_accuracy = get_epoch_loss(model, loss_func, test_loaders['test'], device)
+        print(f'The overall test accuracy is {100 * test_accuracy:.4f}%.')
+        if wandb_run is not None:
+            wandb_run.log({"test/loss": test_loss, "test/accuracy": test_accuracy})
+            wandb_run.finish()
+
+    elif mode == 'eval':
+        # Load saved dataset splits
+        splits = np.load('./splits.npy', allow_pickle=True)
+        ts_split = splits.item()['test']
+        ts_split = [(sample[0], int(sample[1])) for sample in ts_split]
+
+        # Create PyTorch Dataset and DataLoader for the test set
+        ts_dataset = VideoDataset(ts_split, fr_per_vid, val_ts_transforms)
+        dataloaders = test_dloaders(ts_dataset, batch_size, model_type)
+
+        # Load the trained model checkpoint
+        model.load_state_dict(torch.load(args.ckpt))
+        model.to(device)
+        targets, outputs, accuracy = test(model, dataloaders['test'], device)
+
+        print(f'The overall test accuracy is {100 * accuracy:.4f}%.')
+        if args.use_wandb:
+            loss_func = nn.CrossEntropyLoss(reduction='sum')
+            model.eval()
+            with torch.no_grad():
+                test_loss, _ = get_epoch_loss(model, loss_func, dataloaders['test'], device)
+            wandb_run = _init_wandb(args)
+            wandb_run.log({
+                "test/accuracy": accuracy,
+                "test/loss": test_loss,
+                "test/samples": len(targets),
+            })
+            wandb_run.finish()
+
+    else:
+        raise ValueError('The mode argument must be either "train" or "eval".')
+
+if __name__ == "__main__":
+    main(args_parser())

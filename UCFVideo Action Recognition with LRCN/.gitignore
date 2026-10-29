@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.pylint_cache/
+UCF50/
+UCF50_frames/
+UCF50_frames_32/
+HMDB51/
+models/
+wandb/
+*.rar
+archive.zip
+.DS_Store
