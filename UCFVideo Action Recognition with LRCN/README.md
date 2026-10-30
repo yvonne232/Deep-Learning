@@ -46,17 +46,6 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Expected frame directory layout:
-
-```text
-UCF50/
-  ApplyEyeMakeup/
-    v_ApplyEyeMakeup_g01_c01/
-      frame0.jpg
-      frame1.jpg
-      ...
-```
-
 ## Train
 
 ```bash
@@ -83,32 +72,8 @@ bash main/test.sh
 
 ## Weights & Biases Logging
 
-Enable with `--use_wandb`. Logged metrics include:
-
-- `train/loss`, `train/accuracy`
-- `val/loss`, `val/accuracy`
-- `train/lr`
-- `test/accuracy` (eval mode)
-
-To include submission evidence, attach screenshots of your W&B run dashboard showing train/val/test curves.
-
-## Lint and Tests
-
-Run pylint:
-
-```bash
-pylint src tests
-```
-
-Run pytest:
-
-```bash
-pytest -q
-```
-
+Enable with `--use_wandb`.
 
 ## Notes on 93% Target
 
-I have trained multiple times and tried changing hyperparameters; my best result is **89.28% test accuracy**. I am stuck getting it to 93% after trying the approaches I could think of, and I would be interested in how to get it higher by changing the model structure.
-
-Training quality also depends on frame extraction quality, GPU availability, chosen hyperparameters, and proper UCF50 preprocessing. This repository removes known correctness blockers so reported accuracy is meaningful and comparable.
+I have trained multiple times (6-7 times) and tried changing hyperparameters; my best result is 89.28% test accuracy. I am stuck getting it to 93% after trying the approaches I could think of, and I would be interested in how to get it higher by changing the model structure.
