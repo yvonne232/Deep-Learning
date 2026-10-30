@@ -76,4 +76,4 @@ Enable with `--use_wandb`.
 
 ## Notes on 93% Target
 
-I trained this model about 6–7 times while tuning hyperparameters and model structures. The best result is 89.28% test accuracy. I have not reached the 93% target with the changes I tried, and I would like to know how modifying the model architecture could close that gap!
+I trained this model about 6–7 times while tuning hyperparameters and model structures. The best result is 89.28% test accuracy. I have not reached the 93% target with the changes I tried, but I have tried my best and I would like to know how modifying the model architecture could close that gap!
