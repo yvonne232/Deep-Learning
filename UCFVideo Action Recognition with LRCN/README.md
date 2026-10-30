@@ -1,8 +1,6 @@
 # UCF50 Video Action Recognition with LRCN
 
-This repository contains a cleaned and improved LRCN pipeline for action recognition on `UCF50`.
-The codebase was inherited with multiple correctness issues. This version fixes those issues,
-adds experiment tracking, introduces model improvements, and includes tests/linting support.
+This repository contains a cleaned and improved LRCN pipeline for action recognition on `UCF50`. This version fixes those issues, adds experiment tracking, introduces model improvements, and includes tests/linting support.
 
 ## What Was Broken and How It Was Fixed
 
@@ -13,17 +11,12 @@ adds experiment tracking, introduces model improvements, and includes tests/lint
 - **Fix:** split is now **group-aware** using `_gXX_` identifiers from clip names, so each group is
   assigned to exactly one of train/val/test.
 
-### 2) Major sequence bug in LRCN (fixed)
+### 2) Sequence bug in LRCN (fixed)
 
 - **Problem:** LSTM consumed frame features with incorrect sequence semantics.
 - **Fix:** model now uses `batch_first=True`, packs padded sequences with true lengths, and masks padded
   timesteps during pooling.
 
-### 3) Script/import/layout issues (fixed)
-
-- Added missing `src/train.py`.
-- Fixed runnable root-level scripts in `main/train.sh` and `main/test.sh`.
-- Updated defaults from HMDB51 to UCF50 (`n_classes=50`).
 
 ## Model Improvements Implemented
 
@@ -113,19 +106,9 @@ Run pytest:
 pytest -q
 ```
 
-## Reproducibility
-
-- Set seed via `--seed`.
-- Splits are saved to `splits.npy`.
-- Best checkpoint saved to `models/best_model_wts.pt`.
 
 ## Notes on 93% Target
 
-Training quality depends on:
+I have trained multiple times and tried changing hyperparameters; my best result is **89.28% test accuracy**. I am stuck getting it to 93% after trying the approaches I could think of, and I would be interested in how to get it higher by changing the model structure.
 
-- frame extraction quality,
-- GPU availability,
-- chosen hyperparameters,
-- and proper UCF50 preprocessing.
-
-This repository now removes known correctness blockers so reported accuracy is meaningful and comparable.
+Training quality also depends on frame extraction quality, GPU availability, chosen hyperparameters, and proper UCF50 preprocessing. This repository removes known correctness blockers so reported accuracy is meaningful and comparable.
